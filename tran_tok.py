@@ -7,7 +7,7 @@ import torch.nn as NN
 from torch.nn import functional as F
 import matplotlib.pyplot as plt
 
-with open('data/messages.txt', 'r', encoding='utf-8') as f:
+with open('data/cubexfiles.txt', 'r', encoding='utf-8') as f:
     text = f.read()
 
 N = 1000
@@ -16,7 +16,7 @@ import bpeasy
 from bpeasy.tokenizer import BPEasyTokenizer
 
 gpt4_regex = r"""(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"""
-vocab = bpeasy.train_bpe(iter([text]), gpt4_regex, 10, N)
+vocab = bpeasy.train_bpe(iter([text]), gpt4_regex, 16, N)
 special_tokens = []
 tokenizer = BPEasyTokenizer(vocab, gpt4_regex, [], fill_to_nearest_multiple_of_eight=True, name="skype_msgs_tok")
 
@@ -25,7 +25,7 @@ decode = lambda l: tokenizer.decode(l)
 text_enc = encode(text)
 LEN = len(text_enc)
 
-CTX_SZ = 256 #8
+CTX_SZ = 128 #8
 xs, ys = [], []
 for s in range(LEN - CTX_SZ):
     xs.append(text_enc[s:s+CTX_SZ])
@@ -37,12 +37,22 @@ for s in range(LEN - CTX_SZ):
 #xs, ys = list(xs), list(ys)
 
 n = int(0.9 * LEN)
-xs_trn, ys_trn = torch.tensor(xs[:n], dtype=torch.int64), torch.tensor(ys[:n], dtype=torch.int64)
-xs_val, ys_val = torch.tensor(xs[n:], dtype=torch.int64), torch.tensor(ys[n:], dtype=torch.int64)
+#xs_trn, ys_trn = torch.tensor(xs[:n], dtype=torch.int64), torch.tensor(ys[:n], dtype=torch.int64)
+#xs_val, ys_val = torch.tensor(xs[n:], dtype=torch.int64), torch.tensor(ys[n:], dtype=torch.int64)
+xs_trn, ys_trn = xs[:n], ys[:n]
+tmp = list(zip(xs_trn, ys_trn))
+random.shuffle(tmp)
+xs_trn, ys_trn = zip(*tmp)
+xs_trn, ys_trn = list(xs_trn), list(ys_trn)
+xs_val, ys_val = xs[n:], ys[n:]
+tmp = list(zip(xs_val, ys_val))
+random.shuffle(tmp)
+xs_val, ys_val = zip(*tmp)
+xs_val, ys_val = list(xs_val), list(ys_val)
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-xs_trn, ys_trn = xs_trn.to(device), ys_trn.to(device)
-xs_val, ys_val = xs_val.to(device), ys_val.to(device)
+#xs_trn, ys_trn = xs_trn.to(device), ys_trn.to(device)
+#xs_val, ys_val = xs_val.to(device), ys_val.to(device)
 
 class SelfAttentionHead(NN.Module):
     def __init__(self, head_sz, n_emb, ctx_sz, dropout):
@@ -136,11 +146,13 @@ class TransformerLanguageModel(NN.Module):
 
 print(n)
 
-N_EMB = 384 #32
-N_HEADS = 6
-N_BLOCKS = 6
+N_EMB = 512#384 #32
+N_HEADS = 8
+N_BLOCKS = 8
 EVAL_INT = 10
+torch.set_float32_matmul_precision('high')
 model = TransformerLanguageModel(N_BLOCKS, N_HEADS, N, N_EMB, CTX_SZ, 0.2).to(device)
+#model = torch.compile(model)
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
 
 @torch.no_grad()
@@ -157,22 +169,25 @@ def est_loss(model, d):
     model.train()
     return out
 
-#model.load_state_dict(torch.load('./monster.m'))
+#model.load_state_dict(torch.load('./cbx777.m'))
 
-BATCH_SZ = 32 #32
+BATCH_SZ = 16 #32
 lossi = {'trn':[], 'val':[]}
 for k in range(10):
-    for i in range(9000):
-        xb, yb = xs_trn[i*BATCH_SZ : (i+1)*BATCH_SZ], ys_trn[i*BATCH_SZ : (i+1)*BATCH_SZ]
-        logits, loss = model(xb, yb)
+    for i in range(100000):
+        xb, yb = torch.tensor(xs_trn[i*BATCH_SZ : (i+1)*BATCH_SZ], dtype=torch.int64).to(device), torch.tensor(ys_trn[i*BATCH_SZ : (i+1)*BATCH_SZ], dtype=torch.int64).to(device)
+        with torch.autocast(device_type=device, dtype=torch.float16):
+            logits, loss = model(xb, yb)
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         optimizer.step()
-        if i % 1000 == 0:
-            est = est_loss(model, {'trn': [xs_trn, ys_trn], 'val': [xs_val, ys_val]})
+        if i % 10000 == 0:
+            xb, yb = torch.tensor(xs_trn, dtype=torch.int64).to(device), torch.tensor(ys_trn, dtype=torch.int64).to(device)
+            xvb, yvb = torch.tensor(xs_val, dtype=torch.int64).to(device), torch.tensor(ys_val, dtype=torch.int64).to(device)
+            est = est_loss(model, {'trn': [xb, yb], 'val': [xvb, yvb]})
             lossi['trn'].append(est['trn'])
             lossi['val'].append(est['val'])
-            print(est['trn'].item(), est['val'].item())
+            print(est['trn'].item(), est['val'].item(), "./" + str(k) + '_' + str(i))
             torch.save(model.state_dict(), "./" + str(k) + '_' + str(i) + '.m')
 #plt.plot(lossi['trn'])
 #plt.plot(lossi['val'])
